@@ -6,147 +6,122 @@ import re
 import os
 import subprocess
 
-# --- 1. إعداد الصفحة ---
-st.set_page_config(page_title="GMap Spy", page_icon="🕵️‍♂️", layout="centered")
+st.set_page_config(page_title="GMap Spy (Debug)", page_icon="🕵️‍♂️", layout="centered")
 
 @st.cache_resource
-def setup_environment():
-    """تجهيز البيئة وتثبيت المتصفح"""
-    try:
-        subprocess.run(["playwright", "install", "chromium"], check=True)
-    except:
-        pass
+def setup():
+    # تثبيت المتصفح بصمت
+    if not os.path.exists("packages.txt"):
+        subprocess.run(["playwright", "install", "chromium"], check=False)
 
-setup_environment()
+setup()
 
-# --- 2. واجهة المستخدم ---
-st.title("🕵️‍♂️ Spy Maps Pro")
-st.caption("أداة تحليل المنافسين (الإصدار المحسن)")
+st.title("🕵️‍♂️ كاشف المنافسين (وضع التشخيص)")
+st.warning("هذه النسخة ستقوم بتصوير الشاشة إذا حدث خطأ لنعرف السبب.")
 
 with st.sidebar:
     gemini_key = st.text_input("Gemini API Key", type="password")
-    
-target_url = st.text_input("🔗 رابط المنافس:")
-analyze_btn = st.button("🚀 تحليل")
 
-# --- 3. الدوال (Scraping & AI) ---
+url = st.text_input("رابط جوجل ماب:")
+btn = st.button("تحليل")
 
-def clean_url(url):
-    """تنظيف الرابط لضمان الفتح الصحيح"""
-    # نحاول استخراج الرابط النظيف لو كان معقداً
-    if "maps/place" in url:
-        return url.split("/data=")[0]
-    return url
-
-def get_gmap_data(url):
-    """سحب البيانات مع انتظار ذكي للعناصر"""
-    data = {}
+def get_data(target_url):
     with sync_playwright() as p:
+        # 1. إعدادات تخفي قصوى
         browser = p.chromium.launch(
             headless=True,
-            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu']
+            args=[
+                '--no-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--window-size=1920,1080', # حجم شاشة كبير لتجنب وضع الموبايل
+                '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ]
         )
-        page = browser.new_page(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+        page = browser.new_page()
         
         try:
-            final_url = clean_url(url)
-            page.goto(final_url, timeout=60000)
+            st.info("جاري الاتصال...")
             
-            # الانتظار حتى يظهر الاسم (أهم خطوة)
+            # تنظيف الرابط
+            if "/data=" in target_url:
+                target_url = target_url.split("/data=")[0]
+            
+            page.goto(target_url, timeout=60000, wait_until='domcontentloaded')
+            
+            # 2. محاولة التعامل مع نوافذ الكوكيز (Consent Cookies)
+            # جوجل أحياناً يظهر زر "Accept all" يغطي الشاشة
             try:
-                page.wait_for_selector("h1", timeout=20000)
+                page.locator("button:has-text('Accept all')").click(timeout=3000)
+                time.sleep(2)
             except:
-                st.error("⚠️ لم نتمكن من العثور على اسم المكان. قد يكون الرابط خاطئاً أو أن جوجل حظر المحاولة.")
+                pass
+
+            # 3. الانتظار والتحقق
+            try:
+                page.wait_for_selector("h1", state="visible", timeout=15000)
+            except:
+                # 📸 أهم خطوة: تصوير الشاشة عند الفشل
+                st.error("فشل العثور على العنصر. هذه صورة لما يراه الروبوت الآن:")
+                screenshot = page.screenshot()
+                st.image(screenshot, caption="لقطة شاشة من السيرفر", use_column_width=True)
                 return None
 
-            # 1. سحب الاسم
-            data['name'] = page.locator("h1").first.inner_text()
+            # سحب البيانات
+            name = page.locator("h1").first.inner_text()
             
-            # 2. سحب التصنيف (محاولة بعدة طرق)
+            # سحب التصنيف
             try:
-                # طريقة 1: الزر المعتاد
-                data['category'] = page.locator("button[jsaction*='category']").first.inner_text()
+                cat = page.locator("button[jsaction*='category']").first.inner_text()
             except:
-                try:
-                    # طريقة 2: البحث عن أي نص رمادي تحت الاسم
-                    data['category'] = page.locator("h1 + div span").first.inner_text()
-                except:
-                    data['category'] = "تصنيف غير محدد"
-
-            # 3. سحب المراجعات
+                cat = "غير محدد"
+                
+            # سحب المراجعات
+            reviews = ""
             try:
-                # الضغط على تبويب المراجعات
                 page.locator("button[aria-label*='Reviews'], button[aria-label*='مراجعات']").first.click()
                 time.sleep(2)
-                data['reviews'] = " ".join(page.locator(".wiI7pd").all_inner_texts())
+                reviews = " ".join(page.locator(".wiI7pd").all_inner_texts())
             except:
-                data['reviews'] = ""
+                pass
 
-            # 4. الكود المصدري للمخفي
-            data['html_source'] = page.content()
+            # سحب الكود للمخفي
+            html = page.content()
             
+            return {"name": name, "cat": cat, "reviews": reviews, "html": html}
+
         except Exception as e:
-            st.error(f"حدث خطأ فني أثناء السحب: {e}")
+            st.error(f"خطأ غير متوقع: {e}")
             return None
         finally:
             browser.close()
-            
-    return data
 
 def extract_hidden(html, primary):
     if not html or not primary: return []
     clean = re.escape(primary)
     try:
-        match = re.search(rf'\[\\"{clean}\\"(.*?)]', html)
-        if match:
-            return list(set([c for c in re.findall(r'\\"(.*?)\\"', match.group(1)) if len(c)>2 and not c.isdigit()]))
+        m = re.search(rf'\[\\"{clean}\\"(.*?)]', html)
+        if m:
+            return list(set([c for c in re.findall(r'\\"(.*?)\\"', m.group(1)) if len(c)>2 and not c.isdigit()]))
     except:
         pass
     return []
 
-def get_ai_advice(api_key, data, hidden):
+def analyze_ai(api_key, data, hidden):
     genai.configure(api_key=api_key)
-    
-    # محاولة استخدام الفلاش أولاً، ثم العادي
-    models_to_try = ['gemini-1.5-flash', 'gemini-pro']
-    
-    prompt = f"""
-    حلل هذا النشاط التجاري:
-    الاسم: {data.get('name')}
-    التصنيف: {data.get('category')}
-    التصنيفات المخفية: {hidden}
-    مراجعات: {data.get('reviews')[:1000]}
-    
-    المطلوب:
-    1. كلمات مفتاحية مقترحة.
-    2. نصائح لتحسين الظهور.
-    3. وصف احترافي للنشاط.
-    """
-    
-    for model_name in models_to_try:
+    # استخدام قائمة موديلات احتياطية
+    for m in ['gemini-1.5-flash', 'gemini-pro']:
         try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            return response.text
-        except Exception:
-            continue # جرب الموديل اللي بعده
-            
-    return "فشل الاتصال بجميع موديلات Gemini. تأكد من المفتاح وصلاحية الحساب."
+            model = genai.GenerativeModel(m)
+            prompt = f"حلل: {data['name']} - {data['cat']} - {hidden} - {data['reviews'][:1000]}"
+            return model.generate_content(prompt).text
+        except:
+            continue
+    return "فشل الاتصال بـ Gemini"
 
-# --- التشغيل ---
-if analyze_btn and gemini_key and target_url:
-    with st.spinner("جاري العمل..."):
-        result = get_gmap_data(target_url)
-        if result:
-            st.success(f"تم! {result['name']}")
-            hidden_cats = extract_hidden(result.get('html_source'), result.get('category'))
-            
-            col1, col2 = st.columns(2)
-            col1.metric("التصنيف", result.get('category'))
-            if hidden_cats:
-                col2.write(f"المخفي: {hidden_cats}")
-                
-            st.markdown("---")
-            st.markdown(get_ai_advice(gemini_key, result, hidden_cats))
+if btn and url and gemini_key:
+    data = get_data(url)
+    if data:
+        st.success(f"تم الوصول: {data['name']}")
+        hidden = extract_hidden(data['html'], data['cat'])
+        st.write(f"التصنيفات: {data['cat']} | {hidden}")
+        st.write(analyze_ai(gemini_key, data, hidden))
