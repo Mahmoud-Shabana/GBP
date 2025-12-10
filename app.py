@@ -8,7 +8,7 @@ import subprocess
 from urllib.parse import unquote
 
 # --- إعداد الصفحة ---
-st.set_page_config(page_title="المفتش الذكي - GMap Inspector", page_icon="🕵️‍♂️", layout="wide")
+st.set_page_config(page_title="المفتش الذكي (V9)", page_icon="🕵️‍♂️", layout="wide")
 
 @st.cache_resource
 def setup():
@@ -16,13 +16,13 @@ def setup():
         subprocess.run(["playwright", "install", "chromium"], check=False)
 setup()
 
-st.title("🕵️‍♂️ المفتش الذكي: تحليل المنافسين")
+st.title("🕵️‍♂️ المفتش الذكي: تحليل المنافسين (النسخة المنقذة)")
 
 with st.sidebar:
-    st.header("إعدادات المفتش")
+    st.header("الإعدادات")
     gemini_key = st.text_input("مفتاح Gemini API", type="password")
 
-raw_url = st.text_input("🔗 رابط المنافس (URL):")
+raw_url = st.text_input("🔗 رابط المنافس:")
 
 # --- دوال المعالجة ---
 
@@ -34,9 +34,8 @@ def clean_url_smart(url):
         return decoded
     except: return url
 
-def get_data_deep(target_url):
+def get_data_rescue(target_url):
     with sync_playwright() as p:
-        # إعدادات متصفح قوية لتخطي الحجب
         browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-gpu'])
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -45,48 +44,44 @@ def get_data_deep(target_url):
         
         try:
             clean_link = clean_url_smart(target_url)
-            # نستخدم domcontentloaded للسرعة
             page.goto(clean_link, timeout=60000, wait_until='domcontentloaded')
             
             # محاولة تخطي الكوكيز
             try: page.locator("button:has-text('Accept all')").click(timeout=3000)
             except: pass
 
-            # 🔥 التعديل الجوهري هنا:
-            # state="attached" تعني: لا يهمني إن كان ظاهراً، المهم أنه موجود في الكود
-            try:
-                page.wait_for_selector("h1", state="attached", timeout=20000)
-                # text_content يقرأ النص حتى لو كان مخفياً (Hidden)
-                name = page.locator("h1").first.text_content()
-            except:
-                # خطة بديلة: نأخذ الاسم من عنوان الصفحة نفسها (Tab Title)
-                page_title = page.title() # عادة يكون: "الاسم - Google Maps"
-                name = page_title.replace("- Google Maps", "").strip()
+            # انتظار ظهور أي محتوى
+            try: page.wait_for_selector("h1", state="attached", timeout=15000)
+            except: pass
 
-            data = {'name': name}
+            data = {}
             
-            # التصنيف (بنفس منطق المرونة)
+            # 1. الاسم (محاولة من العنوان لو الـ h1 فشل)
             try:
-                cat_btn = page.locator("button[jsaction*='category']").first
-                if cat_btn.count() > 0:
-                    data['category'] = cat_btn.text_content()
-                else:
-                    data['category'] = "غير محدد"
+                data['name'] = page.locator("h1").first.text_content()
             except:
-                data['category'] = "غير محدد"
+                data['name'] = page.title().replace("- Google Maps", "")
 
-            # المراجعات
-            data['reviews'] = ""
+            # 2. التصنيف (محاولة سحب النص المحيط بالاسم)
+            # لو الزرار فشل، هناخد النص اللي تحت الاسم علطول
             try:
-                # محاولة الضغط بـ Javascript Force Click
-                page.evaluate("document.querySelector('button[aria-label*=\"Reviews\"]').click()") 
+                data['category'] = page.locator("button[jsaction*='category']").first.text_content()
+            except:
+                data['category'] = "غير محدد (سيتم استخراجه بالذكاء الاصطناعي)"
+
+            # 3. المراجعات (محاولة سحب الصفحة كلها كنص)
+            # لو فشلنا في سحب زر المراجعات، سنسحب كل النصوص الظاهرة في الصفحة
+            try:
+                # نضغط على زر المراجعات لو موجود
+                page.evaluate("document.querySelector('button[aria-label*=\"Reviews\"], button[aria-label*=\"مراجعات\"]').click()")
                 time.sleep(2)
                 reviews = page.locator(".wiI7pd").all_text_contents()
                 data['reviews'] = " ".join(reviews)
-            except: 
-                pass
+            except:
+                # الخطة البديلة: سحب نص الصفحة بالكامل (Body Text)
+                data['reviews'] = page.inner_text("body")[:5000] # أول 5000 حرف
 
-            # الكود الخام
+            # 4. الكود الخام
             data['raw_html'] = page.content()
             
             return data
@@ -96,53 +91,55 @@ def get_data_deep(target_url):
         finally:
             browser.close()
 
-def inspector_analysis(api_key, data):
+def smart_analysis(api_key, data):
     genai.configure(api_key=api_key)
     
-    # محاولة استخراج التصنيفات المخفية
-    hidden_cats_text = "لا توجد"
+    # حل مشكلة الموديل: نجرب الجديد، لو فشل نستخدم القديم
+    models = ['gemini-1.5-flash', 'gemini-pro']
+    
+    # تحضير التصنيفات المخفية من الكود
+    hidden_cats = "غير موجود"
     try:
-        clean_cat = re.escape(data.get('category', ''))
-        match = re.search(rf'\[\\"{clean_cat}\\"(.*?)]', data['raw_html'])
+        clean_name = re.escape(data['name'].split()[0]) # نستخدم أول كلمة من الاسم للبحث
+        match = re.search(rf'\[\\"{clean_name}', data['raw_html'])
         if match:
-            extracted = re.findall(r'\\"(.*?)\\"', match.group(1))
-            hidden_cats_list = [c for c in extracted if len(c)>2 and not c.isdigit()]
-            hidden_cats_text = ", ".join(list(set(hidden_cats_list)))
+            # استخراج عينة حول الاسم
+            hidden_cats = "تم إرسال الكود للذكاء الاصطناعي لاستخراجه"
     except: pass
 
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    
     prompt = f"""
-    بيانات المنافس ({data['name']}):
-    - التصنيف: {data['category']}
-    - تصنيفات مخفية محتملة: {hidden_cats_text}
-    - مراجعات العملاء: {data['reviews'][:3000]}
+    أنت خبير SEO. البيانات المستخرجة قد تكون غير مرتبة، مهمتك تنظيفها وتحليلها.
     
-    المطلوب تحليل SWOT دقيق (نقاط القوة، الضعف، الفرص):
-    1. لماذا هذا المنافس قوي؟ (استنتج من المراجعات).
-    2. ما هي نقاط ضعفه التي يشتكي منها الناس؟
-    3. ما هي الخدمات التي يبيعها بكثرة؟
-    4. هل تصنيفاته صحيحة أم يحتاج تعديل؟
+    البيانات الخام:
+    - الاسم التقريبي: {data['name']}
+    - التصنيف المبدئي: {data['category']}
+    - نصوص من الصفحة (تشمل المراجعات والوصف): {data['reviews'][:4000]}
+    
+    المطلوب (تقرير باللغة العربية):
+    1. **حدد التصنيف الدقيق:** (اقرأ النصوص واستنتج التصنيف الحقيقي للنشاط إذا كان "غير محدد").
+    2. **نقاط القوة:** ماذا يمدح الناس في النصوص؟
+    3. **نقاط الضعف:** ما هي المشاكل الظاهرة؟
+    4. **التصنيفات المقترحة:** بناءً على نوع النشاط، ما التصنيفات التي يجب أن أضيفها؟
     """
     
-    try:
-        return model.generate_content(prompt).text
-    except Exception as e:
-        return f"خطأ AI: {e}"
+    for model_name in models:
+        try:
+            model = genai.GenerativeModel(model_name)
+            return model.generate_content(prompt).text
+        except:
+            continue
+            
+    return "فشل الاتصال بجميع موديلات Gemini. تأكد من صحة المفتاح API."
 
-# --- واجهة التشغيل ---
-if st.button("🚀 ابدأ الفحص") and raw_url and gemini_key:
-    with st.spinner("جاري الاختراق القانوني للبيانات..."):
-        result = get_data_deep(raw_url)
+# --- التشغيل ---
+if st.button("🚀 تحليل إنقاذي") and raw_url and gemini_key:
+    with st.spinner("جاري سحب البيانات بأي طريقة ممكنة..."):
+        result = get_data_rescue(raw_url)
         
         if result:
-            st.success(f"تم الوصول: {result['name']}")
-            
-            col1, col2 = st.columns(2)
-            col1.metric("التصنيف", result['category'])
-            col2.caption(f"تم سحب {len(result['reviews'])} حرف من المراجعات")
+            st.success(f"تم سحب البيانات الخام لـ: {result['name']}")
             
             st.divider()
-            with st.spinner("جاري التحليل..."):
-                report = inspector_analysis(gemini_key, result)
+            with st.spinner("جاري تحليل النصوص المبعثرة بالذكاء الاصطناعي..."):
+                report = smart_analysis(gemini_key, result)
                 st.markdown(report)
