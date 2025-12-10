@@ -6,102 +6,108 @@ import re
 import os
 import subprocess
 
-# --- إعداد الصفحة ---
-st.set_page_config(page_title="كاشف المنافسين - GMap Spy", page_icon="🕵️‍♂️", layout="centered")
+# --- 1. إعداد الصفحة وتجهيز البيئة ---
+st.set_page_config(page_title="كاشف المنافسين - GMap Spy", page_icon="🕵️‍♂️", layout="wide")
 
-# --- دالة التثبيت التلقائي (تعمل مرة واحدة فقط) ---
+# تثبيت المتصفح تلقائياً عند التشغيل لأول مرة
 @st.cache_resource
-def install_playwright_browser():
-    """
-    تقوم هذه الدالة بتثبيت متصفح Chromium داخل السيرفر
-    لحل مشكلة (Executable doesn't exist)
-    """
-    print("🛠️ جاري التحقق من متصفح Chromium...")
+def install_environment():
+    """تجهيز بيئة التشغيل وتثبيت المتصفح"""
+    print("🛠️ جاري فحص وتثبيت متصفح Chromium...")
     try:
-        # أمر التثبيت
         subprocess.run(["playwright", "install", "chromium"], check=True)
-        print("✅ تم تثبيت المتصفح بنجاح!")
+        print("✅ تم التثبيت بنجاح.")
     except Exception as e:
-        print(f"⚠️ تنبيه: حدثت مشكلة أثناء محاولة التثبيت: {e}")
+        print(f"⚠️ تنبيه: {e}")
 
-# استدعاء الدالة فور تشغيل التطبيق
-install_playwright_browser()
+install_environment()
 
-# --- واجهة التطبيق ---
-st.title("🕵️‍♂️ أداة تحليل المنافسين الذكية")
-st.caption("Developed for Local SEO Analysis")
+# --- 2. دوال مساعدة (تحسينات) ---
 
-with st.sidebar:
-    st.header("⚙️ الإعدادات")
-    gemini_key = st.text_input("مفتاح Gemini API", type="password", help="من Google AI Studio")
-    st.info("ملاحظة: هذه الأداة تتطلب وقتاً (30-60 ثانية) للسحب من جوجل ماب.")
-
-target_url = st.text_input("🔗 ضع رابط جوجل ماب للمنافس هنا:")
-analyze_btn = st.button("🚀 ابدأ التحليل")
-
-# --- الدوال البرمجية (Core Functions) ---
+def clean_gmap_url(url):
+    """تنظيف الرابط من البيانات الزائدة التي تسبب أخطاء"""
+    if not url: return ""
+    # إذا كان الرابط طويلاً ويحتوي على !data، نحذفه
+    if "!3m" in url or "!4m" in url:
+        # نحاول الاحتفاظ بالجزء الأساسي فقط
+        match = re.search(r'(https?://.*?/maps/place/[^/]+/@[\d\.\,\-]+z)', url)
+        if match:
+            return match.group(1)
+    return url
 
 def get_gmap_data(url):
-    """سحب البيانات باستخدام Playwright مع تخطي الحماية"""
+    """سحب البيانات بمتصفح خفي مع تمويه (Anti-Detection)"""
     data = {}
     
     with sync_playwright() as p:
-        # إعدادات المتصفح الخاصة بالسيرفرات (مهمة جداً)
+        # إعدادات لتفادي كشف الروبوت ولمنع الانهيار
         browser = p.chromium.launch(
             headless=True,
             args=[
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-gpu'
+                '--disable-blink-features=AutomationControlled' # تمويه إضافي
             ]
         )
         
-        # إنشاء سياق متصفح جديد
+        # استخدام User-Agent لجهاز ويندوز طبيعي
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         page = context.new_page()
 
         try:
-            # زيادة وقت الانتظار لـ 60 ثانية
-            page.goto(url, timeout=60000)
+            # استخدام الرابط النظيف
+            clean_link = clean_gmap_url(url)
+            page.goto(clean_link if clean_link else url, timeout=60000)
             
-            # انتظار ذكي حتى تحميل العناصر الأساسية
-            page.wait_for_selector("h1", timeout=30000)
-            
+            # انتظار ظهور اسم المكان
+            try:
+                page.wait_for_selector("h1", timeout=20000)
+            except:
+                pass # نكمل حتى لو تأخر قليلاً
+
             # 1. سحب الاسم
-            data['name'] = page.locator("h1").inner_text()
+            try:
+                data['name'] = page.locator("h1").inner_text()
+            except:
+                data['name'] = "غير معروف"
             
-            # 2. سحب التصنيف الأساسي
+            # 2. سحب التصنيف
             try:
                 data['category'] = page.locator("button[jsaction*='category']").first.inner_text()
             except:
                 data['category'] = "غير محدد"
 
-            # 3. سحب المراجعات (تحتاج ضغط زر)
+            # 3. سحب المراجعات
+            data['reviews'] = ""
             try:
-                reviews_btn = page.locator("button[aria-label*='Reviews'], button[aria-label*='مراجعات']")
+                # البحث عن زر المراجعات بعدة صيغ
+                reviews_btn = page.locator("button[aria-label*='Reviews'], button[aria-label*='مراجعات'], div[role='tablist'] button:has-text('Reviews')")
+                
                 if reviews_btn.count() > 0:
                     reviews_btn.first.click()
-                    time.sleep(4) # انتظار فتح القائمة
+                    time.sleep(3)
                     
-                    # محاولة سكرول بسيطة
-                    page.mouse.wheel(0, 2000)
-                    time.sleep(1)
+                    # سكرول لتحميل المزيد
+                    for _ in range(3):
+                        page.mouse.wheel(0, 3000)
+                        time.sleep(1)
                     
                     reviews = page.locator(".wiI7pd").all_inner_texts()
                     data['reviews'] = " ".join(reviews)
+                    data['reviews_count'] = len(reviews)
                 else:
-                    data['reviews'] = ""
+                    data['reviews_count'] = 0
             except:
-                data['reviews'] = "لم يتم سحب مراجعات"
+                data['reviews'] = "تعذر سحب النصوص"
 
             # 4. سحب الكود للتصنيفات المخفية
             data['html_source'] = page.content()
             
         except Exception as e:
-            st.error(f"حدث خطأ أثناء الاتصال بجوجل: {e}")
+            st.error(f"خطأ المتصفح: {e}")
             return None
         finally:
             browser.close()
@@ -109,81 +115,102 @@ def get_gmap_data(url):
     return data
 
 def extract_hidden_cats(html, primary_cat):
-    """استخراج التصنيفات المخفية باستخدام Regex"""
-    if not html or not primary_cat:
-        return []
-    
-    # تنظيف النص للبحث
+    """استخراج التصنيفات الثانوية من الكود"""
+    if not html or not primary_cat: return []
     clean_primary = re.escape(primary_cat)
-    # البحث عن النمط الذي تستخدمه جوجل: ["Primary", "Hidden1", "Hidden2"]
     pattern = rf'\[\\"{clean_primary}\\"(.*?)]'
-    
     matches = re.search(pattern, html)
     if matches:
         raw = matches.group(1)
         cats = re.findall(r'\\"(.*?)\\"', raw)
-        # فلترة: حذف الكلمات القصيرة جداً والأرقام
         return list(set([c for c in cats if len(c) > 2 and not c.isdigit()]))
     return []
 
-def analyze_with_gemini(api_key, business_data, hidden_cats):
-    """إرسال البيانات لـ Gemini للتحليل"""
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-pro')
-    
-    # تحضير النص (Prompt)
-    reviews_snippet = business_data.get('reviews', '')[:3000] # تقليص النص لتجنب تجاوز الحد
-    
-    prompt = f"""
-    أنت خبير SEO محلي (Local SEO) متخصص في Google Business Profile.
-    قم بتحليل بيانات هذا المنافس بدقة:
-    
-    اسم النشاط: {business_data.get('name')}
-    التصنيف الأساسي: {business_data.get('category')}
-    التصنيفات الثانوية المكتشفة: {', '.join(hidden_cats)}
-    عينة من آراء العملاء: {reviews_snippet}
-    
-    المطلوب منك (باللغة العربية):
-    1. استخرج أهم 5 كلمات مفتاحية (Keywords) تكررت في المراجعات الإيجابية.
-    2. حدد نقطة ضعف واحدة أو شكوى تكررت عند العملاء (لنستغلها).
-    3. اقترح علي 3 تصنيفات (Categories) يجب أن أضيفها لملفي فوراً.
-    4. اكتب "وصف نشاط" (Business Description) احترافي وجذاب يتضمن الكلمات المفتاحية المستخرجة.
-    """
-    
+def analyze_with_gemini(api_key, biz_data, hidden_cats):
+    """التحليل باستخدام الموديل الجديد Flash"""
     try:
+        genai.configure(api_key=api_key)
+        # استخدام الموديل الأحدث
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        reviews_text = biz_data.get('reviews', '')
+        if not reviews_text:
+            reviews_text = "لا توجد مراجعات نصية، اعتمد على الاسم والتصنيف."
+
+        prompt = f"""
+        دورك: خبير SEO واستراتيجيات Google Maps.
+        
+        المعطيات عن المنافس:
+        - الاسم: {biz_data.get('name')}
+        - التصنيف الأساسي: {biz_data.get('category')}
+        - التصنيفات المخفية: {', '.join(hidden_cats)}
+        - عينة من كلام العملاء: {reviews_text[:4000]}
+        
+        المطلوب تقرير عملي (Action Plan):
+        1. **الكلمات المفتاحية الذهبية:** استخرج 5 كلمات يبحث عنها الناس لهذا النشاط.
+        2. **كشف الأسرار:** ماذا يفعل هذا المنافس بشكل صحيح؟ (بناءً على التصنيفات والمراجعات).
+        3. **الثغرات:** ما هي الفرصة الضائعة التي يمكننا استغلالها؟
+        4. **خطة المحتوى:** اقترح عنوانين لمنشورات (Posts) وصورة يجب أن أرفعها لملفي.
+        5. **الوصف المقترح:** اكتب وصفاً (Description) لشركتي يتضمن الكلمات المفتاحية.
+        
+        نسق الإجابة بعناوين واضحة ورموز تعبيرية.
+        """
+        
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"خطأ في الاتصال بـ Gemini: {e}"
+        return f"خطأ API: {e}"
 
-# --- منطق التشغيل ---
+# --- 3. واجهة المستخدم ---
 
-if analyze_btn:
-    if not gemini_key or not target_url:
-        st.warning("⚠️ يرجى التأكد من إدخال مفتاح API ورابط المنافس.")
+st.title("🕵️‍♂️ Spy Maps Pro")
+st.markdown("تحليل المنافسين وكشف استراتيجيات الـ SEO الخاصة بهم.")
+
+with st.sidebar:
+    st.header("🔐 بيانات الدخول")
+    gemini_key = st.text_input("Gemini API Key", type="password")
+    st.markdown("---")
+    st.info("نصيحة: استخدم الرابط الطويل من المتصفح للحصول على أفضل نتيجة.")
+
+url_input = st.text_input("رابط المنافس (Google Maps Link):", placeholder="https://www.google.com/maps/place/...")
+btn = st.button("🚀 تحليل الآن", type="primary")
+
+if btn:
+    if not gemini_key or not url_input:
+        st.warning("تأكد من إدخال الرابط ومفتاح الـ API.")
     else:
-        with st.spinner('🕵️‍♂️ جاري الاتصال بالقمر الصناعي وسحب البيانات...'):
-            # 1. السحب
-            result = get_gmap_data(target_url)
+        with st.status("جاري العمل...", expanded=True) as status:
+            st.write("📡 الاتصال بجوجل ماب...")
+            result = get_gmap_data(url_input)
             
             if result:
-                st.success(f"تم سحب البيانات لـ: {result.get('name')}")
-                
-                # 2. استخراج المخفي
+                st.write("✅ تم سحب البيانات الأساسية.")
                 hidden = extract_hidden_cats(result.get('html_source'), result.get('category'))
                 
-                # عرض النتائج الأولية
-                col1, col2 = st.columns(2)
-                col1.metric("التصنيف الأساسي", result.get('category'))
-                col2.metric("عدد المراجعات المسحوبة", len(result.get('reviews', '')) // 50) # تقديري
+                status.update(label="اكتمل السحب! جاري التحليل بالذكاء الاصطناعي...", state="running")
+                report = analyze_with_gemini(gemini_key, result, hidden)
                 
+                status.update(label="تمت المهمة بنجاح!", state="complete", expanded=False)
+                
+                # --- عرض النتائج ---
+                st.divider()
+                
+                # قسم المعلومات العلوية
+                col1, col2, col3 = st.columns(3)
+                col1.metric("الاسم", result.get('name'))
+                col2.metric("التصنيف الأساسي", result.get('category'))
+                col3.metric("عدد المراجعات المسحوبة", result.get('reviews_count', 0))
+                
+                # قسم التصنيفات المخفية
                 if hidden:
-                    with st.expander("🔥 التصنيفات المخفية (Secondary Categories)"):
-                        st.write(hidden)
+                    st.success(f"🎯 التصنيفات المخفية المكتشفة: {', '.join(hidden)}")
+                else:
+                    st.info("لم يتم العثور على تصنيفات ثانوية مخفية.")
                 
-                # 3. تحليل الذكاء الاصطناعي
-                st.markdown("---")
-                st.subheader("🧠 تقرير الذكاء الاصطناعي")
-                with st.spinner("جاري الكتابة..."):
-                    ai_report = analyze_with_gemini(gemini_key, result, hidden)
-                    st.markdown(ai_report)
+                # التقرير الذكي
+                st.subheader("🧠 التقرير الاستراتيجي")
+                st.markdown(report)
+                
+            else:
+                status.update(label="فشلت العملية", state="error")
+                st.error("لم نتمكن من الوصول للرابط. تأكد أنه رابط صحيح (طويل) وحاول مرة أخرى.")
