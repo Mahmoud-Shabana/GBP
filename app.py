@@ -10,7 +10,6 @@ from urllib.parse import unquote
 # --- إعداد الصفحة ---
 st.set_page_config(page_title="المفتش الذكي - GMap Inspector", page_icon="🕵️‍♂️", layout="wide")
 
-# تثبيت المتصفح بصمت عند البدء
 @st.cache_resource
 def setup():
     if not os.path.exists("packages.txt"):
@@ -18,19 +17,16 @@ def setup():
 setup()
 
 st.title("🕵️‍♂️ المفتش الذكي: تحليل المنافسين")
-st.markdown("تحليل نقاط القوة والضعف، التصنيفات المخفية، والخدمات.")
 
 with st.sidebar:
     st.header("إعدادات المفتش")
     gemini_key = st.text_input("مفتاح Gemini API", type="password")
-    st.info("💡 نصيحة: استخدم الرابط الطويل من المتصفح لضمان أدق النتائج.")
 
 raw_url = st.text_input("🔗 رابط المنافس (URL):")
 
 # --- دوال المعالجة ---
 
 def clean_url_smart(url):
-    """تنظيف الرابط لضمان وصول الروبوت"""
     try:
         decoded = unquote(url)
         if "/data=" in decoded: decoded = decoded.split("/data=")[0]
@@ -39,8 +35,8 @@ def clean_url_smart(url):
     except: return url
 
 def get_data_deep(target_url):
-    """سحب البيانات + الكود المصدري"""
     with sync_playwright() as p:
+        # إعدادات متصفح قوية لتخطي الحجب
         browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-gpu'])
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -53,49 +49,60 @@ def get_data_deep(target_url):
             page.goto(clean_link, timeout=60000, wait_until='domcontentloaded')
             
             # محاولة تخطي الكوكيز
-            try: page.locator("button:has-text('Accept all')").click(timeout=2000)
+            try: page.locator("button:has-text('Accept all')").click(timeout=3000)
             except: pass
 
-            page.wait_for_selector("h1", timeout=20000)
-
-            data = {}
-            data['name'] = page.locator("h1").first.inner_text()
-            
-            # التصنيف الظاهر
+            # 🔥 التعديل الجوهري هنا:
+            # state="attached" تعني: لا يهمني إن كان ظاهراً، المهم أنه موجود في الكود
             try:
-                data['category'] = page.locator("button[jsaction*='category']").first.inner_text()
+                page.wait_for_selector("h1", state="attached", timeout=20000)
+                # text_content يقرأ النص حتى لو كان مخفياً (Hidden)
+                name = page.locator("h1").first.text_content()
+            except:
+                # خطة بديلة: نأخذ الاسم من عنوان الصفحة نفسها (Tab Title)
+                page_title = page.title() # عادة يكون: "الاسم - Google Maps"
+                name = page_title.replace("- Google Maps", "").strip()
+
+            data = {'name': name}
+            
+            # التصنيف (بنفس منطق المرونة)
+            try:
+                cat_btn = page.locator("button[jsaction*='category']").first
+                if cat_btn.count() > 0:
+                    data['category'] = cat_btn.text_content()
+                else:
+                    data['category'] = "غير محدد"
             except:
                 data['category'] = "غير محدد"
 
-            # المراجعات (أهم مصدر لمعرفة الخدمات ونقاط القوة)
+            # المراجعات
             data['reviews'] = ""
             try:
-                page.locator("button[aria-label*='Reviews'], button[aria-label*='مراجعات']").first.click()
+                # محاولة الضغط بـ Javascript Force Click
+                page.evaluate("document.querySelector('button[aria-label*=\"Reviews\"]').click()") 
                 time.sleep(2)
-                # سحب أكبر كمية ممكنة من النصوص
-                reviews = page.locator(".wiI7pd").all_inner_texts()
+                reviews = page.locator(".wiI7pd").all_text_contents()
                 data['reviews'] = " ".join(reviews)
-            except: pass
+            except: 
+                pass
 
-            # الكود الخام (عشان ندور فيه على التصنيفات المخفية)
+            # الكود الخام
             data['raw_html'] = page.content()
             
             return data
         except Exception as e:
-            st.error(f"خطأ أثناء الفحص: {e}")
+            st.error(f"خطأ تقني: {e}")
             return None
         finally:
             browser.close()
 
 def inspector_analysis(api_key, data):
-    """العقل المدبر: يحلل كل شيء ويعطي التقرير المفصل"""
     genai.configure(api_key=api_key)
     
-    # محاولة استخراج التصنيفات المخفية من الكود الأول
+    # محاولة استخراج التصنيفات المخفية
     hidden_cats_text = "لا توجد"
     try:
-        clean_cat = re.escape(data['category'])
-        # بحث سريع في الكود حول التصنيف الأساسي
+        clean_cat = re.escape(data.get('category', ''))
         match = re.search(rf'\[\\"{clean_cat}\\"(.*?)]', data['raw_html'])
         if match:
             extracted = re.findall(r'\\"(.*?)\\"', match.group(1))
@@ -103,55 +110,39 @@ def inspector_analysis(api_key, data):
             hidden_cats_text = ", ".join(list(set(hidden_cats_list)))
     except: pass
 
-    # تجهيز التقرير لـ Gemini
     model = genai.GenerativeModel('gemini-1.5-flash')
     
     prompt = f"""
-    تصرف كمستشار أعمال وخبير SEO. لديك بيانات لمنافس (الاسم: {data['name']}).
+    بيانات المنافس ({data['name']}):
+    - التصنيف: {data['category']}
+    - تصنيفات مخفية محتملة: {hidden_cats_text}
+    - مراجعات العملاء: {data['reviews'][:3000]}
     
-    البيانات المستخرجة:
-    1. التصنيف المعلن: {data['category']}
-    2. تصنيفات مخفية محتملة في الكود: {hidden_cats_text}
-    3. آراء العملاء (Raw Reviews): {data['reviews'][:3000]}
-    
-    المطلوب منك تحليل دقيق جداً (باللغة العربية) يجيب على هذه النقاط:
-    
-    أولاً: نقاط القوة (Why they are strong?) 💪
-    - ما الذي يمدحه الناس بشدة؟ (السرعة؟ السعر؟ التعامل؟ جودة منتج معين؟)
-    
-    ثانياً: نقاط الضعف (Weaknesses & Gaps) 📉
-    - ما هي المشاكل التي تكررت في الشكاوى؟ (استخرج منها فرص لي).
-    
-    ثالثاً: هيكل التصنيفات (Categories Structure) 🏷️
-    - حلل التصنيف الأساسي والمخفي، واقترح عليّ: هل أستخدم نفس التصنيفات؟
-    
-    رابعاً: الخدمات الأساسية (Core Services) 🛠️
-    - استنتج من كلام الناس ما هي "الخدمات الفعلية" التي يبيعها هذا المنافس بكثرة (مثلاً: هل يركز على الجملة؟ التجزئة؟ توصيل سريع؟).
-    
-    نسق الإجابة بشكل نقاط واضحة وجذابة.
+    المطلوب تحليل SWOT دقيق (نقاط القوة، الضعف، الفرص):
+    1. لماذا هذا المنافس قوي؟ (استنتج من المراجعات).
+    2. ما هي نقاط ضعفه التي يشتكي منها الناس؟
+    3. ما هي الخدمات التي يبيعها بكثرة؟
+    4. هل تصنيفاته صحيحة أم يحتاج تعديل؟
     """
     
     try:
         return model.generate_content(prompt).text
     except Exception as e:
-        return f"حدث خطأ في التحليل الذكي: {e}"
+        return f"خطأ AI: {e}"
 
 # --- واجهة التشغيل ---
 if st.button("🚀 ابدأ الفحص") and raw_url and gemini_key:
-    with st.spinner("جاري إرسال المفتش السري..."):
+    with st.spinner("جاري الاختراق القانوني للبيانات..."):
         result = get_data_deep(raw_url)
         
         if result:
-            st.success(f"تم الإمساك بالهدف: {result['name']}")
+            st.success(f"تم الوصول: {result['name']}")
             
-            # عرض سريع للبيانات
             col1, col2 = st.columns(2)
-            col1.metric("التصنيف الرئيسي", result['category'])
-            col2.metric("حجم البيانات المحللة", f"{len(result['reviews'])} حرف")
+            col1.metric("التصنيف", result['category'])
+            col2.caption(f"تم سحب {len(result['reviews'])} حرف من المراجعات")
             
             st.divider()
-            
-            # عرض التقرير الذكي
-            with st.spinner("جاري كتابة تقرير نقاط القوة والضعف..."):
+            with st.spinner("جاري التحليل..."):
                 report = inspector_analysis(gemini_key, result)
                 st.markdown(report)
