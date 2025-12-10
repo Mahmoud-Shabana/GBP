@@ -2,13 +2,12 @@ import streamlit as st
 from playwright.sync_api import sync_playwright
 import google.generativeai as genai
 import time
-import re
 import os
 import subprocess
 from urllib.parse import unquote
 
 # --- إعداد الصفحة ---
-st.set_page_config(page_title="المفتش الذكي (V9)", page_icon="🕵️‍♂️", layout="wide")
+st.set_page_config(page_title="GMap Analyst V10", page_icon="☢️", layout="wide")
 
 @st.cache_resource
 def setup():
@@ -16,15 +15,13 @@ def setup():
         subprocess.run(["playwright", "install", "chromium"], check=False)
 setup()
 
-st.title("🕵️‍♂️ المفتش الذكي: تحليل المنافسين (النسخة المنقذة)")
+st.title("☢️ أداة التحليل الشامل (الحل النهائي)")
+st.caption("تقنية سحب النص الكامل + تحليل Gemini 1.5 Flash")
 
 with st.sidebar:
-    st.header("الإعدادات")
     gemini_key = st.text_input("مفتاح Gemini API", type="password")
-
-raw_url = st.text_input("🔗 رابط المنافس:")
-
-# --- دوال المعالجة ---
+    
+raw_url = st.text_input("🔗 رابط المنافس (استخدم الرابط الطويل):")
 
 def clean_url_smart(url):
     try:
@@ -34,112 +31,90 @@ def clean_url_smart(url):
         return decoded
     except: return url
 
-def get_data_rescue(target_url):
+def get_data_blind(target_url):
+    """
+    استراتيجية السحب الأعمى:
+    لا نبحث عن عناصر محددة، بل نسحب كل النص الظاهر في الصفحة.
+    """
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-gpu'])
+        # نستخدم موبايل أندرويد عشان الصفحة تكون خفيفة والنص واضح
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Linux; Android 10; SM-A205U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.101 Mobile Safari/537.36"
         )
         page = context.new_page()
         
         try:
             clean_link = clean_url_smart(target_url)
+            # انتظار التحميل
             page.goto(clean_link, timeout=60000, wait_until='domcontentloaded')
             
-            # محاولة تخطي الكوكيز
-            try: page.locator("button:has-text('Accept all')").click(timeout=3000)
+            # ننتظر 6 ثواني "عمياني" عشان نضمن إن النصوص ظهرت
+            time.sleep(6)
+            
+            # محاولة بسيطة لتوسيع المراجعات لو زرار "المزيد" موجود
+            try:
+                page.locator("button").get_by_text("More").click(timeout=2000)
             except: pass
 
-            # انتظار ظهور أي محتوى
-            try: page.wait_for_selector("h1", state="attached", timeout=15000)
-            except: pass
-
-            data = {}
+            # 🔥 اللقطة الحاسمة: سحب كل نص الصفحة
+            # بنقوله: هات كل كلمة مكتوبة في الـ body
+            full_text = page.inner_text("body")
             
-            # 1. الاسم (محاولة من العنوان لو الـ h1 فشل)
-            try:
-                data['name'] = page.locator("h1").first.text_content()
-            except:
-                data['name'] = page.title().replace("- Google Maps", "")
-
-            # 2. التصنيف (محاولة سحب النص المحيط بالاسم)
-            # لو الزرار فشل، هناخد النص اللي تحت الاسم علطول
-            try:
-                data['category'] = page.locator("button[jsaction*='category']").first.text_content()
-            except:
-                data['category'] = "غير محدد (سيتم استخراجه بالذكاء الاصطناعي)"
-
-            # 3. المراجعات (محاولة سحب الصفحة كلها كنص)
-            # لو فشلنا في سحب زر المراجعات، سنسحب كل النصوص الظاهرة في الصفحة
-            try:
-                # نضغط على زر المراجعات لو موجود
-                page.evaluate("document.querySelector('button[aria-label*=\"Reviews\"], button[aria-label*=\"مراجعات\"]').click()")
-                time.sleep(2)
-                reviews = page.locator(".wiI7pd").all_text_contents()
-                data['reviews'] = " ".join(reviews)
-            except:
-                # الخطة البديلة: سحب نص الصفحة بالكامل (Body Text)
-                data['reviews'] = page.inner_text("body")[:5000] # أول 5000 حرف
-
-            # 4. الكود الخام
-            data['raw_html'] = page.content()
+            # تنظيف النص من الفراغات الزيادة
+            clean_text = "\n".join([line for line in full_text.split('\n') if line.strip()])
             
-            return data
+            return clean_text[:8000] # نأخذ أول 8000 حرف (كافية جداً للتحليل)
+
         except Exception as e:
-            st.error(f"خطأ تقني: {e}")
+            st.error(f"خطأ في السحب: {e}")
             return None
         finally:
             browser.close()
 
-def smart_analysis(api_key, data):
+def ai_analyze_raw_text(api_key, raw_text):
     genai.configure(api_key=api_key)
     
-    # حل مشكلة الموديل: نجرب الجديد، لو فشل نستخدم القديم
-    models = ['gemini-1.5-flash', 'gemini-pro']
+    # استخدام الموديل الأحدث حصراً
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
-    # تحضير التصنيفات المخفية من الكود
-    hidden_cats = "غير موجود"
-    try:
-        clean_name = re.escape(data['name'].split()[0]) # نستخدم أول كلمة من الاسم للبحث
-        match = re.search(rf'\[\\"{clean_name}', data['raw_html'])
-        if match:
-            # استخراج عينة حول الاسم
-            hidden_cats = "تم إرسال الكود للذكاء الاصطناعي لاستخراجه"
-    except: pass
-
     prompt = f"""
-    أنت خبير SEO. البيانات المستخرجة قد تكون غير مرتبة، مهمتك تنظيفها وتحليلها.
+    أمامك "نص خام" تم سحبه من صفحة نشاط تجاري على Google Maps. النص قد يكون غير مرتب.
     
-    البيانات الخام:
-    - الاسم التقريبي: {data['name']}
-    - التصنيف المبدئي: {data['category']}
-    - نصوص من الصفحة (تشمل المراجعات والوصف): {data['reviews'][:4000]}
+    النص الخام:
+    '''
+    {raw_text}
+    '''
     
-    المطلوب (تقرير باللغة العربية):
-    1. **حدد التصنيف الدقيق:** (اقرأ النصوص واستنتج التصنيف الحقيقي للنشاط إذا كان "غير محدد").
-    2. **نقاط القوة:** ماذا يمدح الناس في النصوص؟
-    3. **نقاط الضعف:** ما هي المشاكل الظاهرة؟
-    4. **التصنيفات المقترحة:** بناءً على نوع النشاط، ما التصنيفات التي يجب أن أضيفها؟
+    مهمتك استخراج المعلومات التالية بدقة وتحليلها:
+    1. **اسم النشاط**: (استخرجه من النص).
+    2. **التصنيف الدقيق**: (ابحث في النص عن كلمات زي "Medical supply store", "متجر", "شركة").
+    3. **الخدمات المذكورة**: (ماذا يبيعون؟ هل هناك توصيل؟ جملة؟ تجزئة؟).
+    4. **نقاط القوة/الضعف**: (حلل أي جمل تبدو كآراء عملاء أو تقييمات).
+    5. **كلمات مفتاحية**: 5 كلمات قوية للـ SEO.
+    
+    اكتب التقرير باللغة العربية بتنسيق منظم.
     """
     
-    for model_name in models:
-        try:
-            model = genai.GenerativeModel(model_name)
-            return model.generate_content(prompt).text
-        except:
-            continue
-            
-    return "فشل الاتصال بجميع موديلات Gemini. تأكد من صحة المفتاح API."
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"خطأ في Gemini: {e}"
 
 # --- التشغيل ---
-if st.button("🚀 تحليل إنقاذي") and raw_url and gemini_key:
-    with st.spinner("جاري سحب البيانات بأي طريقة ممكنة..."):
-        result = get_data_rescue(raw_url)
+if st.button("🚀 تحليل عميق") and raw_url and gemini_key:
+    with st.spinner("جاري سحب الصفحة بالكامل (Blind Scraping)..."):
+        text_data = get_data_blind(raw_url)
         
-        if result:
-            st.success(f"تم سحب البيانات الخام لـ: {result['name']}")
+        if text_data:
+            st.success("تم سحب النص الخام بنجاح!")
+            
+            with st.expander("عرض النص الخام المستخرج (للمراجعة)"):
+                st.text(text_data[:1000] + "...")
             
             st.divider()
-            with st.spinner("جاري تحليل النصوص المبعثرة بالذكاء الاصطناعي..."):
-                report = smart_analysis(gemini_key, result)
+            
+            with st.spinner("Gemini يقوم بتحليل البيانات الآن..."):
+                report = ai_analyze_raw_text(gemini_key, text_data)
                 st.markdown(report)
