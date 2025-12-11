@@ -7,32 +7,31 @@ import subprocess
 from urllib.parse import unquote
 
 # --- إعداد الصفحة ---
-st.set_page_config(page_title="GMap Analyst V11", page_icon="☢️", layout="wide")
+st.set_page_config(page_title="GMap Analyst Final", page_icon="🕵️‍♂️", layout="wide")
 
+# محاولة تثبيت المتصفح إذا لم يكن موجوداً (إجراء احتياطي)
 @st.cache_resource
-def setup():
-    # إجراء احتياطي: تثبيت تعريفات المتصفح إذا لم تكن موجودة
+def setup_env():
     if not os.path.exists("packages.txt"):
         try:
-            subprocess.run(["playwright", "install", "chromium"], check=False)
-        except:
-            pass
-setup()
+            # محاولة تثبيت المكتبات الناقصة في الخلفية
+            subprocess.run(["playwright", "install-deps"], check=False)
+        except: pass
+setup_env()
 
-st.title("☢️ أداة التحليل الشامل (الحل النهائي)")
-st.caption("تقنية السحب باستخدام متصفح النظام + تحليل Gemini 1.5 Flash")
+st.title("🕵️‍♂️ المفتش الذكي (النسخة النهائية)")
+st.caption("يعمل باستخدام متصفح النظام Chromium لتفادي أخطاء السيرفر")
 
 with st.sidebar:
-    st.header("الإعدادات")
+    st.header("بيانات الدخول")
     gemini_key = st.text_input("مفتاح Gemini API", type="password")
-    st.info("تأكد من وجود ملف packages.txt في GitHub ليعمل هذا الكود.")
+    st.warning("⚠️ ملاحظة: تأكد من تعديل ملف packages.txt في GitHub ليحتوي على chromium فقط.")
 
-raw_url = st.text_input("🔗 رابط المنافس (استخدم الرابط الطويل من المتصفح):")
+raw_url = st.text_input("🔗 رابط المنافس (الرابط الطويل):")
 
 # --- دوال المعالجة ---
 
 def clean_url_smart(url):
-    """تنظيف الرابط لضمان الفتح الصحيح"""
     try:
         decoded = unquote(url)
         if "/data=" in decoded: decoded = decoded.split("/data=")[0]
@@ -40,20 +39,18 @@ def clean_url_smart(url):
         return decoded
     except: return url
 
-def get_data_blind(target_url):
+def get_data_system_browser(target_url):
     """
-    استراتيجية السحب باستخدام متصفح النظام (System Browser)
-    لتفادي أخطاء الانهيار على Streamlit Cloud
+    سحب البيانات باستخدام متصفح النظام المثبت مسبقاً
     """
     with sync_playwright() as p:
-        # مسار متصفح كروم المثبت عبر packages.txt
-        system_browser_path = "/usr/bin/chromium"
+        # محاولة تحديد مسار كروم المثبت على سيرفر Streamlit
+        # المسار عادة يكون هنا بعد تثبيت chromium package
+        executable_path = "/usr/bin/chromium"
         
-        browser = None
         try:
-            # المحاولة الأولى: استخدام متصفح النظام (الأكثر استقراراً)
             browser = p.chromium.launch(
-                executable_path=system_browser_path,
+                executable_path=executable_path,
                 headless=True,
                 args=[
                     '--no-sandbox',
@@ -63,18 +60,18 @@ def get_data_blind(target_url):
                 ]
             )
         except Exception as e:
-            # المحاولة الثانية: استخدام المتصفح الافتراضي (Fallback)
-            print(f"فشل استخدام متصفح النظام، جاري تجربة المتصفح المدمج: {e}")
+            # إذا فشل المسار المحدد، نترك Playwright يحاول البحث بنفسه
+            print(f"فشل تشغيل متصفح النظام، جاري المحاولة التلقائية: {e}")
             try:
                 browser = p.chromium.launch(
                     headless=True,
                     args=['--no-sandbox', '--disable-gpu']
                 )
             except Exception as e2:
-                st.error(f"فشل تشغيل المتصفح تماماً: {e2}")
+                st.error(f"خطأ قاتل: لم يتم العثور على متصفح. {e2}")
                 return None
 
-        # استخدام وضع الموبايل لتخفيف الصفحة
+        # استخدام سياق موبايل لتسريع التحميل
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Linux; Android 10; SM-A205U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.101 Mobile Safari/537.36"
         )
@@ -86,72 +83,69 @@ def get_data_blind(target_url):
             # الذهاب للصفحة
             page.goto(clean_link, timeout=60000, wait_until='domcontentloaded')
             
-            # انتظار "أعمى" للتأكد من تحميل النصوص
-            time.sleep(5)
+            # انتظار 4 ثواني للتأكد من ظهور النصوص
+            time.sleep(4)
             
-            # محاولة تخطي الكوكيز
+            # محاولة تخطي زر الكوكيز
             try:
-                page.locator("button").get_by_text("Accept all").click(timeout=2000)
+                page.locator("button").get_by_text("Accept all").click(timeout=1000)
             except: pass
 
-            # سحب النص بالكامل من الصفحة
+            # سحب كل النصوص الموجودة في الصفحة
             full_text = page.inner_text("body")
             
-            # تنظيف بسيط للنص (حذف الأسطر الفارغة)
+            # تنظيف النص
             clean_text = "\n".join([line for line in full_text.split('\n') if line.strip()])
             
-            return clean_text[:8000] # نأخذ أول 8000 حرف
+            # نأخذ جزء كافي من النص للتحليل (أول 10000 حرف)
+            return clean_text[:10000]
 
         except Exception as e:
-            st.error(f"حدث خطأ أثناء قراءة الصفحة: {e}")
+            st.error(f"حدث خطأ أثناء التصفح: {e}")
             return None
         finally:
             if browser:
                 browser.close()
 
-def ai_analyze_raw_text(api_key, raw_text):
+def ai_analyze(api_key, text):
     genai.configure(api_key=api_key)
-    
-    # استخدام الموديل السريع
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # استخدام الموديل المتوفر
+    models = ['gemini-1.5-flash', 'gemini-pro']
     
     prompt = f"""
-    أمامك نص خام تم سحبه من صفحة Google Maps لنشاط تجاري.
-    النص غير مرتب ويحتوي على كل شيء (قوائم، مراجعات، وصف).
-    
-    النص الخام:
+    أمامك محتوى نصي "خام" تم سحبه من صفحة Google Maps لنشاط تجاري.
+    النص:
     '''
-    {raw_text}
+    {text}
     '''
     
-    مهمتك استخراج تقرير منظم باللغة العربية:
-    1. **اسم النشاط**: (استنتجه من النص).
-    2. **التصنيف الدقيق**: (ابحث عن كلمات مثل "متجر"، "عيادة"، "شركة" وتفاصيلها).
-    3. **الخدمات والمنتجات**: (ماذا يبيعون؟ هل يوجد توصيل؟).
-    4. **تحليل المراجعات**: (ما هي نقاط القوة والضعف بناءً على آراء الناس المذكورة في النص؟).
-    5. **5 كلمات مفتاحية**: (مقترحة للـ SEO).
+    استخرج تقرير احترافي (باللغة العربية):
+    1. **اسم النشاط**:
+    2. **التصنيف**: (ابحث بدقة في النص).
+    3. **الخدمات**: (ماذا يقدمون؟).
+    4. **نقاط القوة والضعف**: (من خلال تحليل المراجعات الموجودة في النص).
+    5. **اقتراحات SEO**: (5 كلمات مفتاحية).
     """
     
-    try:
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"خطأ في تحليل Gemini: {e}"
+    for m in models:
+        try:
+            model = genai.GenerativeModel(m)
+            return model.generate_content(prompt).text
+        except:
+            continue
+    return "فشل الاتصال بجميع موديلات Gemini. تأكد من المفتاح."
 
-# --- التشغيل الرئيسي ---
-if st.button("🚀 تحليل عميق") and raw_url and gemini_key:
-    with st.spinner("جاري سحب النص الكامل للصفحة (Blind Scan)..."):
-        text_data = get_data_blind(raw_url)
+# --- التشغيل ---
+if st.button("🚀 تحليل الآن") and raw_url and gemini_key:
+    with st.spinner("جاري الاتصال بالسيرفر وسحب البيانات..."):
+        text_data = get_data_system_browser(raw_url)
         
         if text_data:
-            st.success("تم سحب محتوى الصفحة بنجاح!")
-            
-            # عرض جزء من النص للمراجعة (اختياري)
-            with st.expander("عرض النص الخام المستخرج"):
-                st.text(text_data[:1000] + "...")
+            st.success("تم سحب البيانات بنجاح!")
+            with st.expander("عرض النص الخام"):
+                st.text(text_data[:1000])
             
             st.divider()
-            
-            with st.spinner("جاري تحليل البيانات بواسطة Gemini 1.5 Flash..."):
-                report = ai_analyze_raw_text(gemini_key, text_data)
+            with st.spinner("جاري التحليل بالذكاء الاصطناعي..."):
+                report = ai_analyze(gemini_key, text_data)
                 st.markdown(report)
