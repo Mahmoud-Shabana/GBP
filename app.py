@@ -6,9 +6,10 @@ import os
 import subprocess
 from urllib.parse import unquote
 
-st.set_page_config(page_title="GMap Analyst Final", page_icon="🎯", layout="wide")
+# --- إعداد الصفحة ---
+st.set_page_config(page_title="GMap Analyst Stable", page_icon="⚖️", layout="wide")
 
-# تثبيت المتصفح عند الحاجة
+# محاولة تثبيت المتصفح (إجراء احتياطي)
 @st.cache_resource
 def setup_env():
     if not os.path.exists("packages.txt"):
@@ -17,98 +18,126 @@ def setup_env():
         except: pass
 setup_env()
 
-st.title("🎯 المفتش الذكي (وضع البيانات السريعة)")
+st.title("⚖️ المفتش المستقر (Gemini Pro + Full Load)")
+st.caption("يعتمد على التحميل الكامل للصفحة لضمان الدقة + موديل Pro المتوافق مع الجميع")
 
 with st.sidebar:
     gemini_key = st.text_input("مفتاح Gemini API", type="password")
+    st.info("💡 نصيحة: إذا تأخر التحميل، اصبر قليلاً، الدقة أهم من السرعة.")
 
-raw_url = st.text_input("🔗 رابط المنافس:")
+raw_url = st.text_input("🔗 رابط المنافس (الرابط الطويل):")
 
-def get_data_balanced(target_url):
+def clean_url_smart(url):
+    try:
+        decoded = unquote(url)
+        # إزالة البيانات الزائدة التي قد تسبب مشاكل
+        if "/data=" in decoded: decoded = decoded.split("/data=")[0]
+        if ",17z" in decoded: decoded = decoded.split(",17z")[0] + ",17z"
+        return decoded
+    except: return url
+
+def get_data_stable(target_url):
     with sync_playwright() as p:
+        # استخدام متصفح النظام إذا وجد، أو تحميل جديد
         executable_path = "/usr/bin/chromium"
         try:
-            browser = p.chromium.launch(
-                executable_path=executable_path,
-                headless=True,
-                args=['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
-            )
+            browser = p.chromium.launch(executable_path=executable_path, headless=True, args=['--no-sandbox', '--disable-gpu'])
         except:
             browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-gpu'])
 
+        # نستخدم User Agent لجهاز كمبيوتر عادي (Desktop) لضمان ظهور البيانات كاملة
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         page = context.new_page()
 
-        # 🔥 التعديل: نحظر الصور والخطوط فقط، ونسمح بالبيانات
-        page.route("**/*", lambda route: route.abort() 
-                   if route.request.resource_type in ["image", "media", "font"] 
-                   else route.continue_())
-        
         try:
-            if "/data=" in target_url: target_url = target_url.split("/data=")[0]
+            clean_link = clean_url_smart(target_url)
             
-            # ننتظر حتى استقرار الشبكة (networkidle) لأننا خففنا الصفحة
-            page.goto(target_url, timeout=60000, wait_until='networkidle')
+            # 1. الذهاب للصفحة (بدون حظر أي ملفات هذه المرة لضمان التحميل)
+            # زدنا الوقت لـ 90 ثانية تحسباً لبطء السيرفر
+            page.goto(clean_link, timeout=90000, wait_until='domcontentloaded')
             
+            # 2. الانتظار الذكي: لن نتحرك حتى يظهر اسم المحل (h1)
+            try:
+                page.wait_for_selector("h1", state="attached", timeout=20000)
+            except:
+                st.warning("⚠️ الصفحة تأخرت في التحميل، سنحاول سحب ما ظهر...")
+
             # محاولة تخطي الكوكيز
-            try: page.locator("button").get_by_text("Accept all").click(timeout=1000)
+            try: page.locator("button").get_by_text("Accept all").click(timeout=2000)
             except: pass
             
-            # محاولة فتح المراجعات
+            # محاولة فتح تبويب المراجعات (Reviews)
             try:
                 page.locator("button[aria-label*='Reviews'], button[aria-label*='مراجعات']").first.click()
-                time.sleep(2)
+                time.sleep(3) # انتظار تحميل النصوص
             except: pass
 
-            # سحب النص
+            # 3. سحب النصوص
             full_text = page.inner_text("body")
-            clean_text = "\n".join([line for line in full_text.split('\n') if line.strip()])
+            
+            # تنظيف وتنسيق
+            lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+            clean_text = "\n".join(lines)
             
             return clean_text[:15000]
 
         except Exception as e:
-            st.error(f"خطأ أثناء السحب: {e}")
+            st.error(f"حدث خطأ أثناء السحب: {e}")
             return None
         finally:
             browser.close()
 
 def ai_analyze(api_key, text):
     genai.configure(api_key=api_key)
-    # استخدام الموديل الأحدث
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    # 🔥 التغيير الحاسم: استخدام gemini-pro بدلاً من flash
+    # هذا الموديل يعمل على المكتبات القديمة والجديدة
+    model_name = 'gemini-pro'
     
     prompt = f"""
-    لديك نص خام من صفحة نشاط تجاري (يحتوي على اسم، تصنيف، ومراجعات).
+    أنت خبير تحليل بيانات. أمامك نص خام تم سحبه من صفحة Google Maps لنشاط تجاري.
+    النص قد يحتوي على قوائم وكلمات غير مرتبة.
     
     النص:
     '''
     {text}
     '''
     
-    استخرج تقرير عربي دقيق:
-    1. اسم النشاط.
-    2. التصنيف الظاهر.
-    3. الخدمات المستنتجة.
-    4. نقاط القوة والضعف (من المراجعات).
-    5. 5 كلمات مفتاحية.
+    المطلوب استخراج تقرير عربي دقيق:
+    1. **اسم النشاط**: (ابحث عن العنوان الرئيسي).
+    2. **التصنيف**: (ابحث عن نوع النشاط مثل مطعم، شركة، مستشفى).
+    3. **ملخص المراجعات**: (ماذا يقول الناس؟ نقاط إيجابية وسلبية).
+    4. **الخدمات**: (ماذا يقدمون؟).
+    5. **كلمات مفتاحية**: (5 كلمات SEO).
+    
+    إذا لم تجد معلومات كافية، قل ذلك بوضوح.
     """
     
     try:
+        model = genai.GenerativeModel(model_name)
         return model.generate_content(prompt).text
     except Exception as e:
-        return f"خطأ في Gemini: {e} (تأكد أن المفتاح صحيح وأن المكتبة محدثة)"
+        return f"خطأ في Gemini: {e}"
 
-if st.button("🚀 تحليل") and raw_url and gemini_key:
-    with st.spinner("جاري سحب البيانات (بدون صور)..."):
-        text_data = get_data_balanced(raw_url)
+# --- التشغيل ---
+if st.button("🚀 تحليل مستقر") and raw_url and gemini_key:
+    with st.spinner("جاري التحميل الكامل للصفحة (قد يستغرق دقيقة)..."):
+        text_data = get_data_stable(raw_url)
         
         if text_data:
-            st.success("تم السحب!")
-            with st.expander("معاينة النص"):
-                st.text(text_data[:1000])
-            st.divider()
-            with st.spinner("جاري التحليل..."):
-                report = ai_analyze(gemini_key, text_data)
-                st.markdown(report)
+            # تحقق بسيط: هل سحبنا بيانات خرائط عامة أم بيانات محل؟
+            if "Restaurants" in text_data[:500] and "Hotels" in text_data[:500] and len(text_data) < 2000:
+                st.warning("⚠️ تنبيه: يبدو أن الرابط فتح خريطة عامة ولم يفتح المحل المحدد. تأكد من استخدام الرابط الطويل المباشر للمحل.")
+                with st.expander("عرض النص المسحوب"):
+                    st.text(text_data)
+            else:
+                st.success("تم سحب بيانات المحل بنجاح!")
+                with st.expander("معاينة النص"):
+                    st.text(text_data[:1000])
+                
+                st.divider()
+                with st.spinner(f"جاري التحليل باستخدام Gemini Pro..."):
+                    report = ai_analyze(gemini_key, text_data)
+                    st.markdown(report)
