@@ -6,10 +6,9 @@ import os
 import subprocess
 from urllib.parse import unquote
 
-# --- إعداد الصفحة ---
-st.set_page_config(page_title="GMap Fast Analyst", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="GMap Analyst Final", page_icon="🎯", layout="wide")
 
-# إعداد البيئة (تثبيت كروم لو مش موجود)
+# تثبيت المتصفح عند الحاجة
 @st.cache_resource
 def setup_env():
     if not os.path.exists("packages.txt"):
@@ -18,19 +17,15 @@ def setup_env():
         except: pass
 setup_env()
 
-st.title("⚡ المفتش السريع (وضع النصوص فقط)")
-st.caption("يقوم بحظر الصور والخرائط لضمان التحميل السريع جداً")
+st.title("🎯 المفتش الذكي (وضع البيانات السريعة)")
 
 with st.sidebar:
     gemini_key = st.text_input("مفتاح Gemini API", type="password")
 
 raw_url = st.text_input("🔗 رابط المنافس:")
 
-# --- دوال المعالجة ---
-
-def get_data_turbo(target_url):
+def get_data_balanced(target_url):
     with sync_playwright() as p:
-        # 1. إعداد المتصفح
         executable_path = "/usr/bin/chromium"
         try:
             browser = p.chromium.launch(
@@ -39,7 +34,6 @@ def get_data_turbo(target_url):
                 args=['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
             )
         except:
-            # لو فشل المسار نستخدم الافتراضي
             browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-gpu'])
 
         context = browser.new_context(
@@ -47,34 +41,32 @@ def get_data_turbo(target_url):
         )
         page = context.new_page()
 
-        # 🔥 الخطوة السحرية: منع تحميل الصور والخرائط والخطوط
-        # ده هيحل مشكلة الـ Timeout بنسبة 100% إن شاء الله
+        # 🔥 التعديل: نحظر الصور والخطوط فقط، ونسمح بالبيانات
         page.route("**/*", lambda route: route.abort() 
-                   if route.request.resource_type in ["image", "media", "font", "stylesheet", "other"] 
+                   if route.request.resource_type in ["image", "media", "font"] 
                    else route.continue_())
         
         try:
-            # تنظيف الرابط
             if "/data=" in target_url: target_url = target_url.split("/data=")[0]
             
-            # الذهاب للصفحة (المفروض تفتح في ثواني لأنها بدون صور)
-            # نستخدم wait_until='commit' يعني "أول ما تتصل بالسيرفر كمل شغل متستناش التحميل"
-            page.goto(target_url, timeout=60000, wait_until='commit')
-            
-            # انتظار بسيط للنصوص
-            page.wait_for_selector("h1", state="attached", timeout=20000)
+            # ننتظر حتى استقرار الشبكة (networkidle) لأننا خففنا الصفحة
+            page.goto(target_url, timeout=60000, wait_until='networkidle')
             
             # محاولة تخطي الكوكيز
             try: page.locator("button").get_by_text("Accept all").click(timeout=1000)
             except: pass
-
-            # سحب النص فوراً
-            full_text = page.inner_text("body")
             
-            # تنظيف النص
+            # محاولة فتح المراجعات
+            try:
+                page.locator("button[aria-label*='Reviews'], button[aria-label*='مراجعات']").first.click()
+                time.sleep(2)
+            except: pass
+
+            # سحب النص
+            full_text = page.inner_text("body")
             clean_text = "\n".join([line for line in full_text.split('\n') if line.strip()])
             
-            return clean_text[:12000] # كمية نص كافية
+            return clean_text[:15000]
 
         except Exception as e:
             st.error(f"خطأ أثناء السحب: {e}")
@@ -84,37 +76,37 @@ def get_data_turbo(target_url):
 
 def ai_analyze(api_key, text):
     genai.configure(api_key=api_key)
-    models = ['gemini-1.5-flash', 'gemini-pro']
+    # استخدام الموديل الأحدث
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
     prompt = f"""
-    لديك نص خام تم سحبه من صفحة Google Maps (وضع النصوص فقط).
+    لديك نص خام من صفحة نشاط تجاري (يحتوي على اسم، تصنيف، ومراجعات).
+    
     النص:
     '''
     {text}
     '''
     
-    استخرج تقرير عربي احترافي:
-    1. اسم النشاط والتصنيف الدقيق.
-    2. الخدمات التي يقدمها (استنتجها من الكلام).
-    3. نقاط القوة والضعف (من المراجعات المذكورة في النص).
-    4. 5 كلمات مفتاحية (SEO Keywords).
+    استخرج تقرير عربي دقيق:
+    1. اسم النشاط.
+    2. التصنيف الظاهر.
+    3. الخدمات المستنتجة.
+    4. نقاط القوة والضعف (من المراجعات).
+    5. 5 كلمات مفتاحية.
     """
     
-    for m in models:
-        try:
-            model = genai.GenerativeModel(m)
-            return model.generate_content(prompt).text
-        except: continue
-    return "فشل الاتصال بـ Gemini."
+    try:
+        return model.generate_content(prompt).text
+    except Exception as e:
+        return f"خطأ في Gemini: {e} (تأكد أن المفتاح صحيح وأن المكتبة محدثة)"
 
-# --- التشغيل ---
-if st.button("🚀 تحليل فوري") and raw_url and gemini_key:
-    with st.spinner("جاري سحب النصوص فقط (بدون خرائط)..."):
-        text_data = get_data_turbo(raw_url)
+if st.button("🚀 تحليل") and raw_url and gemini_key:
+    with st.spinner("جاري سحب البيانات (بدون صور)..."):
+        text_data = get_data_balanced(raw_url)
         
         if text_data:
-            st.success("تم سحب البيانات!")
-            with st.expander("عرض النص الخام"):
+            st.success("تم السحب!")
+            with st.expander("معاينة النص"):
                 st.text(text_data[:1000])
             st.divider()
             with st.spinner("جاري التحليل..."):
